@@ -36,14 +36,14 @@ type txOpcodes struct {
 	opcodes []opcode
 }
 
-type OpcodeTracer struct {
+type opcodeTracer struct {
 	txs []txOpcodes
 }
 
-func (ot *OpcodeTracer) CaptureStart(depth int, from common.Address, to common.Address, call bool, input []byte, gas uint64, value *big.Int) error {
+func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.Address, call bool, input []byte, gas uint64, value *big.Int) error {
 	return nil
 }
-func (ot *OpcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, st *stack.Stack, _ *stack.ReturnStack, rData []byte, contract *vm.Contract, depth int, err error) error {
+func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, st *stack.Stack, _ *stack.ReturnStack, rData []byte, contract *vm.Contract, depth int, err error) error {
 	// go down the storage hierarchy, creating levels if they don't exist already
 	lastTx := ot.txs[len(ot.txs)-1].txHash
 	currentTx := env.TxHash
@@ -62,29 +62,29 @@ func (ot *OpcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 
 	return nil
 }
-func (ot *OpcodeTracer) CaptureFault(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, stack *stack.Stack, _ *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
+func (ot *opcodeTracer) CaptureFault(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, stack *stack.Stack, _ *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
 	return nil
 }
-func (ot *OpcodeTracer) CaptureEnd(depth int, output []byte, gasUsed uint64, t time.Duration, err error) error {
+func (ot *opcodeTracer) CaptureEnd(depth int, output []byte, gasUsed uint64, t time.Duration, err error) error {
 	return nil
 }
-func (ot *OpcodeTracer) CaptureCreate(creator common.Address, creation common.Address) error {
+func (ot *opcodeTracer) CaptureCreate(creator common.Address, creation common.Address) error {
 	return nil
 }
-func (ot *OpcodeTracer) CaptureAccountRead(account common.Address) error {
+func (ot *opcodeTracer) CaptureAccountRead(account common.Address) error {
 	return nil
 }
-func (ot *OpcodeTracer) CaptureAccountWrite(account common.Address) error {
+func (ot *opcodeTracer) CaptureAccountWrite(account common.Address) error {
 	return nil
 }
 
-func NewOpcodeTracer() *OpcodeTracer {
-	return &OpcodeTracer{}
+func NewOpcodeTracer() *opcodeTracer {
+	return &opcodeTracer{}
 }
 
 // Hm re-executes historical transactions in read-only mode
 // and checks that their outputs match the database ChangeSets.
-func Hm(genesis *core.Genesis, blockNum uint64, chaindata string, historyfile string, nocheck bool, writeReceipts bool) error {
+func OpcodeTracer(genesis *core.Genesis, blockNum uint64, chaindata string, historyfile string, nocheck bool, writeReceipts bool) error {
 	if len(historyfile) == 0 {
 		historyfile = chaindata
 	}
