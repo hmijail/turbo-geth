@@ -59,7 +59,7 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 	tracedTx.opcodes = append(tracedTx.opcodes, opcode{pc, op, stackTop})
 
 	fmt.Printf("Tx  %s pc %x opcode %s", currentTx.String(), pc, op.String())
-	
+
 	return nil
 }
 func (ot *opcodeTracer) CaptureFault(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, stack *stack.Stack, _ *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
@@ -135,6 +135,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 
 		dbstate := state.NewPlainDBState(historyDb.KV(), block.NumberU64()-1)
 		intraBlockState := state.New(dbstate)
+		intraBlockState.SetTracer(ot)
 		csw := state.NewChangeSetWriterPlain(block.NumberU64() - 1)
 		var blockWriter state.StateWriter
 		if nocheck {
