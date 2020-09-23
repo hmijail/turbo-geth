@@ -1,9 +1,12 @@
 package stateless
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/ledgerwatch/turbo-geth/core/vm/stack"
+	"math/big"
 	"os"
 	"os/signal"
 	"runtime"
@@ -22,6 +25,64 @@ import (
 	"github.com/ledgerwatch/turbo-geth/log"
 )
 
+type opcode struct {
+	pc uint64
+	op vm.OpCode
+	stackTop *stack.Stack
+}
+
+type txOpcodes struct {
+	txHash common.Hash
+	contractAddress common.Address
+	opcodes []opcode
+}
+
+type opcodeTracer struct {
+	txs []txOpcodes
+}
+
+func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.Address, call bool, input []byte, gas uint64, value *big.Int) error {
+	return nil
+}
+func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, st *stack.Stack, _ *stack.ReturnStack, rData []byte, contract *vm.Contract, depth int, err error) error {
+	// go down the storage hierarchy, creating levels if they don't exist already
+	lastTx := ot.txs[len(ot.txs)-1].txHash
+	currentTx := env.TxHash
+	if lastTx != currentTx {
+		ot.txs = append(ot.txs, txOpcodes{currentTx, *contract.CodeAddr, make([]opcode,0,10)})
+	}
+
+	tracedTx := &ot.txs[len(ot.txs)-1]
+	//opcodes := &tracedTx.opcodes
+	stackTop := new(stack.Stack)
+	copy(stackTop.Data, st.Data)
+
+	tracedTx.opcodes = append(tracedTx.opcodes, opcode{pc, op, stackTop})
+
+
+
+	return nil
+}
+func (ot *opcodeTracer) CaptureFault(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, stack *stack.Stack, _ *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
+	return nil
+}
+func (ot *opcodeTracer) CaptureEnd(depth int, output []byte, gasUsed uint64, t time.Duration, err error) error {
+	return nil
+}
+func (ot *opcodeTracer) CaptureCreate(creator common.Address, creation common.Address) error {
+	return nil
+}
+func (ot *opcodeTracer) CaptureAccountRead(account common.Address) error {
+	return nil
+}
+func (ot *opcodeTracer) CaptureAccountWrite(account common.Address) error {
+	return nil
+}
+
+func NewOpcodeTracer() *opcodeTracer {
+	return &opcodeTracer{}
+}
+
 // CheckChangeSets re-executes historical transactions in read-only mode
 // and checks that their outputs match the database ChangeSets.
 func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, historyfile string, nocheck bool, writeReceipts bool) error {
@@ -39,6 +100,12 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		interruptCh <- true
 	}()
 
+	csvFile, err := os.OpenFile("./opcodes.csv", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	check(err)
+	defer csvFile.Close()
+	w := bufio.NewWriter(csvFile)
+	defer w.Flush()
+
 	chainDb := ethdb.MustOpen(chaindata)
 	defer chainDb.Close()
 	historyDb := chainDb
@@ -52,7 +119,8 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 	defer historyTx.Rollback()
 	chainConfig := genesis.Config
 	engine := ethash.NewFaker()
-	vmConfig := vm.Config{}
+	ot := NewOpcodeTracer()
+	vmConfig := vm.Config{Tracer: ot, Debug: true}
 	txCacher := core.NewTxSenderCacher(runtime.NumCPU())
 	bc, err := core.NewBlockChain(chainDb, nil, chainConfig, engine, vmConfig, nil, txCacher)
 	if err != nil {
@@ -209,6 +277,19 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 				return nil
 			}
 		}
+
+		numOpcodes := 0
+		for _ , t := range ot.txs {
+			fmt.Fprintf(w, "%x\n", t.txHash)
+			for _ , o := range t.opcodes {
+				fmt.Fprintf(w, "\t%x\t%s\t%v", o.pc, o.op.String(), o.stackTop)
+			}
+			numOpcodes += len(t.opcodes)
+			// remove used elements?
+		}
+
+		fmt.Printf("Block %d : %d txs, %d opcodes \n", blockNum, len(ot.txs), numOpcodes)
+
 
 		blockNum++
 		if blockNum%1000 == 0 {
