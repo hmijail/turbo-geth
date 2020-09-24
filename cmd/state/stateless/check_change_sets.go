@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -31,35 +32,40 @@ type opcode struct {
 }
 
 type txOpcodes struct {
-	txHash common.Hash
+	txHash string
 	contractAddress common.Address
 	opcodes []opcode
 }
 
 type opcodeTracer struct {
 	txs []txOpcodes
+	counter int
 }
 
 func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.Address, call bool, input []byte, gas uint64, value *big.Int) error {
 	//fmt.Printf("from %s", from.String())
+	ot.counter ++
 	return nil
 }
 func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, st *stack.Stack, _ *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
 	// go down the storage hierarchy, creating levels if they don't exist already
-	var lastTx common.Hash
-	if len(ot.txs) == 0 {
-		lastTx = common.Hash{}
+	var lastTx string
+	if l := len(ot.txs); l == 0 {
+		lastTx = ""
 	} else {
-		lastTx = ot.txs[len(ot.txs)-1].txHash
+		lastTx = ot.txs[l-1].txHash
 	}
-	currentTx := env.TxHash
+	currentTx := env.TxHash.String()
+	if depth>1 {
+		currentTx += "-" + strconv.Itoa(depth)
+	}
 	if lastTx != currentTx {
 		ot.txs = append(ot.txs, txOpcodes{currentTx, *contract.CodeAddr, make([]opcode,0,10)})
 	}
 
 	tracedTx := &ot.txs[len(ot.txs)-1]
 	//opcodes := &tracedTx.opcodes
-	stackTop := new(stack.Stack)
+	stackTop := stack.New(7)
 	copy(stackTop.Data, st.Data)
 
 	tracedTx.opcodes = append(tracedTx.opcodes, opcode{pc, op, stackTop})
@@ -281,7 +287,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 
 		numOpcodes := 0
 		for _ , t := range ot.txs {
-			fmt.Fprintf(w, "%x\n", t.txHash)
+			fmt.Fprintf(w, "tx %x\n", t.txHash)
 			for _ , o := range t.opcodes {
 				fmt.Fprintf(w, "\t%x\t%x\t%s\t", o.pc, o.op, o.op.String())
 				if l := len(o.stackTop.Data); l > 0 {
@@ -295,7 +301,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 			numOpcodes += len(t.opcodes)
 			// remove used elements?
 		}
-		fmt.Printf("Block %d : %d txs, %d opcodes \n", blockNum, len(ot.txs), numOpcodes)
+		fmt.Printf("Block %d : %d txs, %d opcodes, counter = %d \n", blockNum, len(ot.txs), numOpcodes, ot.counter)
 		ot.txs = nil
 
 		blockNum++
@@ -310,7 +316,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		default:
 		}
 
-		if blockNum>9000010 {
+		if blockNum>9000000 {
 			interrupt = true
 		}
 	}
