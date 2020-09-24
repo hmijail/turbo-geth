@@ -105,10 +105,10 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		interruptCh <- true
 	}()
 
-	csvFile, err := os.OpenFile("./opcodes.csv", os.O_WRONLY|os.O_CREATE, 0600)
+	f, err := os.OpenFile("./opcodes", os.O_WRONLY|os.O_CREATE, 0600)
 	check(err)
-	defer csvFile.Close()
-	w := bufio.NewWriter(csvFile)
+	defer f.Close()
+	w := bufio.NewWriter(f)
 	defer w.Flush()
 
 	chainDb := ethdb.MustOpen(chaindata)
@@ -283,12 +283,16 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		for _ , t := range ot.txs {
 			fmt.Fprintf(w, "%x\n", t.txHash)
 			for _ , o := range t.opcodes {
-				fmt.Fprintf(w, "\t%x\t%s\t%v", o.pc, o.op.String(), o.stackTop)
+				fmt.Fprintf(w, "\t%x\t%s\t", o.pc, o.op.String())
+				for i := range o.stackTop.Data {
+					fmt.Fprintf(w, "%s ", o.stackTop.Data[i].Hex())
+				}
+				fmt.Fprint(w, "\n")
 			}
 			numOpcodes += len(t.opcodes)
 			// remove used elements?
 		}
-
+		ot.txs = nil
 		fmt.Printf("Block %d : %d txs, %d opcodes \n", blockNum, len(ot.txs), numOpcodes)
 
 
@@ -303,7 +307,10 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 			fmt.Println("interrupted, please wait for cleanup...")
 		default:
 		}
-		interrupt = true
+
+		if blockNum>9000010 {
+			interrupt = true
+		}
 	}
 	if writeReceipts {
 		log.Info("Committing final receipts", "batch size", common.StorageSize(batch.BatchSize()))
