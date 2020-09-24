@@ -41,7 +41,7 @@ type opcodeTracer struct {
 }
 
 func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.Address, call bool, input []byte, gas uint64, value *big.Int) error {
-	fmt.Printf("from %s", from.String())
+	//fmt.Printf("from %s", from.String())
 	return nil
 }
 func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, st *stack.Stack, _ *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
@@ -284,6 +284,9 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 			fmt.Fprintf(w, "%x\n", t.txHash)
 			for _ , o := range t.opcodes {
 				fmt.Fprintf(w, "\t%x\t%s\t", o.pc, o.op.String())
+				if l := len(o.stackTop.Data); l > 0 {
+					fmt.Fprintf(w, "%d : ", l)
+				}
 				for i := range o.stackTop.Data {
 					fmt.Fprintf(w, "%s ", o.stackTop.Data[i].Hex())
 				}
