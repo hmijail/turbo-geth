@@ -46,7 +46,12 @@ func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.A
 }
 func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, st *stack.Stack, _ *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
 	// go down the storage hierarchy, creating levels if they don't exist already
-	lastTx := ot.txs[len(ot.txs)-1].txHash
+	var lastTx common.Hash
+	if len(ot.txs) == 0 {
+		lastTx = common.Hash{}
+	} else {
+		lastTx = ot.txs[len(ot.txs)-1].txHash
+	}
 	currentTx := env.TxHash
 	if lastTx != currentTx {
 		ot.txs = append(ot.txs, txOpcodes{currentTx, *contract.CodeAddr, make([]opcode,0,10)})
@@ -59,7 +64,7 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 
 	tracedTx.opcodes = append(tracedTx.opcodes, opcode{pc, op, stackTop})
 
-	fmt.Printf("Tx  %s pc %x opcode %s", currentTx.String(), pc, op.String())
+	//fmt.Printf("Tx  %s pc %x opcode %s", currentTx.String(), pc, op.String())
 
 	return nil
 }
@@ -100,7 +105,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		interruptCh <- true
 	}()
 
-	csvFile, err := os.OpenFile("./opcodes.csv", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	csvFile, err := os.OpenFile("./opcodes.csv", os.O_WRONLY|os.O_CREATE, 0600)
 	check(err)
 	defer csvFile.Close()
 	w := bufio.NewWriter(csvFile)
