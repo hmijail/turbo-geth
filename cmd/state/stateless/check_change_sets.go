@@ -283,21 +283,20 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		for _ , t := range ot.txs {
 			fmt.Fprintf(w, "%x\n", t.txHash)
 			for _ , o := range t.opcodes {
-				fmt.Fprintf(w, "\t%x\t%s\t", o.pc, o.op.String())
+				fmt.Fprintf(w, "\t%x\t%x\t%s\t", o.pc, o.op, o.op.String())
 				if l := len(o.stackTop.Data); l > 0 {
 					fmt.Fprintf(w, "%d : ", l)
 				}
 				for i := range o.stackTop.Data {
-					fmt.Fprintf(w, "%s ", o.stackTop.Data[i].Hex())
+					fmt.Fprintf(w, "%s ", o.stackTop.Data[i].String())
 				}
 				fmt.Fprint(w, "\n")
 			}
 			numOpcodes += len(t.opcodes)
 			// remove used elements?
 		}
-		ot.txs = nil
 		fmt.Printf("Block %d : %d txs, %d opcodes \n", blockNum, len(ot.txs), numOpcodes)
-
+		ot.txs = nil
 
 		blockNum++
 		if blockNum%1000 == 0 {
