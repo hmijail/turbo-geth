@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/turbo-geth/common"
 	"github.com/ledgerwatch/turbo-geth/common/changeset"
 	"github.com/ledgerwatch/turbo-geth/consensus/ethash"
@@ -21,42 +22,50 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
+	"strconv"
 	"syscall"
 	"time"
 )
 
+//const MaxUint = ^uint(0)
+//const MaxUint64 = ^uint64(0)
+
 type opcode struct {
 	Pc       		Uint64AsHex
-	Op       		string
+	Op       		vm.OpCode
 	StackTop 		*stack.Stack
 	//StackTop 		[]uint256.Int
 	RetStackTop		[]uint32
 	MaxStack 		int
 	MaxRStack 		int
-	Fault    		bool
+	Fault    		error
 	//Depth 			int
 }
 
 type tx struct {
 	TxHash          string
 	Depth 			int
-	Create			bool
-	ContractAddress common.Address
+	TxAddr			string
+	CodeHash 		string
 	From            common.Address
 	To              common.Address
 	Input 			ByteSliceAsHex
+	Segments 		[]segment
+	Create			bool
+	Fault 			error
 	Opcodes         []opcode
 }
 
 type opcodeTracer struct {
 	Txs             	[]*tx
 	detail, summary   	*bufio.Writer
-	c 					int
+	//c 					int
 	stack 				[]*tx
-	stackIndexes		[]int
+	//stackIndexes		[]int
 	showNext			bool
 	lastLine			string
+	txsInDepth			[]int8
+
 }
 
 type ByteSliceAsHex struct {
@@ -83,18 +92,44 @@ func min(a int, b int) int {
 	}
 }
 
+type segment struct {
+	Start 	uint64
+	End		uint64
+}
+
 func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) error {
-	fmt.Fprint(ot.summary, ot.lastLine)
-	fmt.Fprintf(ot.summary, "%sStart from=%v to=%v d=%d \n", strings.Repeat("\t",depth), from.String(), to.String(),depth)
+	//fmt.Fprint(ot.summary, ot.lastLine)
 
 	// When a CaptureStart is called, a Tx is starting. Create its entry in our list and initialize it with the partial data available
-	newTx := tx{From: from, To: to,  Create: create, Input: ByteSliceAsHex{input}, Depth: depth}
+	//calculate the "address" of the Tx in its tree
+	ltid := len(ot.txsInDepth)
+	if ltid-1 != depth {
+		panic(fmt.Sprintf("Wrong addr slice depth: d=%d, slice len=%d", depth, ltid))
+	}
+	//if depth > ltid-1  {
+	//	ot.txsInDepth = append(ot.txsInDepth, 0)
+	//}
+	ot.txsInDepth[depth]++
+	ot.txsInDepth = append(ot.txsInDepth, 0)
+
+	ls := len(ot.stack)
+	txAddr := ""
+	if ls>0 {
+		txAddr = ot.stack[ls-1].TxAddr + "-" + strconv.Itoa(int(ot.txsInDepth[depth]))// fmt.Sprintf("%s-%d", ot.stack[ls-1].TxAddr, ot.txsInDepth[depth])
+	} else {
+		txAddr = strconv.Itoa(int(ot.txsInDepth[depth]))
+	}
+	newTx := tx{From: from, To: to,  Create: create, Input: ByteSliceAsHex{input}, Depth: depth, TxAddr: txAddr}
 	ot.Txs = append(ot.Txs, &newTx)
 
 	// take note in our own stack that the tx stack has grown
+	//ltxs := len(ot.Txs)
 	ot.stack = append(ot.stack, &newTx)
 
 	ot.showNext = true
+
+	//fmt.Fprintf(ot.summary, "%sStart addr=%s from=%v to=%v d=%d \n", strings.Repeat("\t",depth), txAddr, from.String(), to.String(),depth)
+
 	return nil
 }
 
@@ -105,32 +140,25 @@ func (ot *opcodeTracer) CaptureEnd(depth int, output []byte, gasUsed uint64, t t
 	// When a CaptureEnd is called, a Tx has finished. Pop our stack
 	ls := len(ot.stack)
 	currentEntry := ot.stack[ls-1]
-	//sanity check: the last entry in our stack should be the last entry in the list of txs
-	//lse := ot.stack[ls-1]
-	//if lse != lastEntry {
-	//	panic(fmt.Sprintf("End of tx: last item of stack should be == last item of list of txs, but isn't\n" +
-	//		"last in stack:\ttx=%d-%s ops=%d from=%s\n" +
-	//		"last in list:\ttx=%d-%s ops=%d from=%s\n",
-	//		lse.Depth, lse.TxHash, len(lse.Opcodes), lse.From,
-	//		lastEntry.Depth, lastEntry.TxHash, len(lastEntry.Opcodes), lastEntry.From))
-	//}
+	// sanity check: depth of stack == depth reported by system
+	if ls-1 != depth || depth != currentEntry.Depth {
+		panic(fmt.Sprintf("End of Tx at d=%d but stack has d=%d and entry has d=%", depth, ls, currentEntry.Depth))
+	}
 	ot.stack = ot.stack[ : ls-1]
+	currentEntry.Fault = err
+	ot.txsInDepth = ot.txsInDepth[:depth+1]
 
-	fmt.Fprint(ot.summary, ot.lastLine)
+
+	//fmt.Fprint(ot.summary, ot.lastLine)
 	ot.lastLine = ""
 
-	//sanity check
-	if depth != currentEntry.Depth {
-		panic(fmt.Sprintf("End of tx at depth=%d, but trace entry's depth=%d", depth, currentEntry.Depth))
-	}
 
 
-
-	fmt.Fprintf(ot.summary, "%sEnd d=%v ops=%d", strings.Repeat("\t",depth), depth, len(currentEntry.Opcodes))
-	if err != nil {
-		fmt.Fprintf(ot.summary, " e=%v", err.Error())
-	}
-	fmt.Fprintf(ot.summary, "\n")
+	//fmt.Fprintf(ot.summary, "%sEnd d=%v ops=%d", strings.Repeat("\t",depth), depth, len(currentEntry.Opcodes))
+	//if err != nil {
+	//	fmt.Fprintf(ot.summary, " e=%v", err.Error())
+	//}
+	//fmt.Fprintf(ot.summary, "\n")
 	//ot.summary.Flush()
 
 
@@ -138,12 +166,12 @@ func (ot *opcodeTracer) CaptureEnd(depth int, output []byte, gasUsed uint64, t t
 	//if the finished transaction was only a value transfer (no opcodes), then we're not interested in it. Remove it from our list.
 	// if there were opcodes, the entry would have been fully init'ed, and so it would have a TxHash
 	// also, a tx without opcodes can't have subordinate txs
-	if currentEntry.TxHash == "" {
-		fmt.Printf("Dumping value tx from %s\n", currentEntry.From.String())
-		fmt.Fprintf(ot.summary,"%sDumping value tx from %s\n", strings.Repeat("\t",depth), currentEntry.From.String())
-		lt := len(ot.Txs)
-		ot.Txs = ot.Txs[:lt-1]
-	}
+	//if currentEntry.TxHash == "" {
+	//	//fmt.Printf("Dumping value tx from %s\n", currentEntry.From.String())
+	//	fmt.Fprintf(ot.summary,"%sDumping value tx from %s\n", strings.Repeat("\t",depth), currentEntry.From.String())
+	//	lt := len(ot.Txs)
+	//	ot.Txs = ot.Txs[:lt-1]
+	//}
 
 	ot.showNext = true
 	return nil
@@ -154,10 +182,6 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 	currentTxHash := env.TxHash.String()
 	currentTxDepth := opDepth - 1
 
-	//l := len(ot.Txs)
-	//lastTxEntry := &ot.Txs[l-1]
-	//lastEntryHash := &lastTxEntry.TxHash
-
 	ls := len(ot.stack)
 	currentEntry := ot.stack[ls-1]
 
@@ -167,7 +191,7 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 	}
 
 	// prepare the opcode's stack for saving
-	stackTop := stack.New()
+	stackTop := &stack.Stack{Data: make([]uint256.Int, 0, 7)}//stack.New()
 	// the most stack positions consumed by any opcode is 7
 	for i:= min(7, st.Len()-1); i>=0; i-- {
 		stackTop.Push(st.Back(i))
@@ -192,15 +216,12 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 
 		// fill in the missing data in the entry
 		currentEntry.TxHash = currentTxHash
-		currentEntry.ContractAddress = contract.Address()
+		currentEntry.CodeHash = contract.CodeHash.String()
 		//fmt.Fprintf(ot.w, "%sFilled in TxHash\n", strings.Repeat("\t",depth))
 	}
 
-	//cases:
-	// same tx hash, same depth
-	// same tx hash, different depth
-	// different hash, startDepth ==0
 
+/*
 	line := fmt.Sprintf("%s%d-%s", strings.Repeat("\t", currentTxDepth), currentTxDepth, currentTxHash )
 	line += fmt.Sprintf("\tpc=%x op=%s ops=%d", pc, op.String(), len(currentEntry.Opcodes))
 	if err != nil {
@@ -209,99 +230,24 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 	line += fmt.Sprintf("\n")
 
 	if ot.showNext {
-		fmt.Fprintf(ot.summary, line)
+		//fmt.Fprintf(ot.summary, line)
 		ot.showNext = false
 	}
 
 	ot.lastLine = line
-/*
-	// if there is any hint that the current op is in a different transaction, print something
-	if !((currentEntry.TxHash == currentTxHash) && (lastTxEntry.Depth == currentTxDepth)) {
-		// they can never change at the same time. Either we're at depth 0 and then TxHash can change between calls;
-		// or we're at depth >0 and then the TxHash is fixed
-
-		fmt.Fprintf(ot.summary, "%s%d-%s",
-			strings.Repeat("\t", currentTxDepth), currentTxDepth, currentTxHash )
-
-		fmt.Fprintf(ot.summary, "\tpc=%x op=%s", pc, op.String())
-		if err != nil {
-			fmt.Fprintf(ot.summary, " ---- e=%v", err.Error())
-		}
-
-		fmt.Fprintf(ot.summary, "\n")
-	}
-
-
-	// check the assumption that depth and txHash don't change at the same time
-	if (*lastEntryHash != currentTxHash) && (lastTxEntry.Depth != currentTxDepth) && (currentTxDepth != 0) {
-		panic("Both hash and depth changed at once")
-	}
-
-	// beginning and end of Txs get a CaptureStart and CaptureEnd call, so they are easy to track. But there is no explicit capture func for a returning tx
-	// here we need to
-	// decide to which transaction does the opcode belong, and do the related bookkeeping
-	if (*lastEntryHash == currentTxHash) {
-		//adjust our stack if the depth has changed
-		switch {
-		case lastTxEntry.Depth == currentTxDepth:
-			// default case, already dealt with
-
-		case lastTxEntry.Depth < currentTxDepth:
-			// this case can't be detected like this, because CaptureStart was needed to create the last entry in our stack, and that entry has the right depth.
-			// we leave the case here for clarity. The actual processing is the case lastEntryHash == ""
-
-
-		case lastTxEntry.Depth > currentTxDepth:
-			// the tx call stack was just popped. Find the existing Tx record that corresponds to the current Opcode.
-			fmt.Fprintf(ot.summary, "%sPop from d=%d to d=%d\n",strings.Repeat("\t", currentTxDepth), lastTxEntry.Depth, currentTxDepth)
-			l := len(ot.stack)
-			// the last element of our stack is the tx that has finished. We want the previous element.
-			currentEntry = ot.stack[l-1]
-			//sanity check
-			if currentTxHash != currentEntry.TxHash || currentTxDepth != currentEntry.Depth {
-				panic(fmt.Sprintf("Tried returning to previous Tx, but hash is different\n" +
-					"Current  \td=%d,h=%s\n" +
-					"Recovered\td=%d,h=%s\n", currentTxDepth, currentTxHash, currentEntry.Depth, currentEntry.TxHash))
-			}
-		}
-	} else {
-		// it's a different tx
-		if currentTxDepth != 0 {
-			panic(fmt.Sprintf("Changing Tx while in depth = %d\nOldTx = %x\nNewTx = %x\n", currentTxDepth, lastEntryHash, currentTxHash))
-		}
-		// since it's a different tx, this must be the first opcode for this tx. assert it, and store the tx in our stack
-		if len(ot.stack) != 0 {
-			panic(fmt.Sprintf("Changed Tx but stack is not empty: last Tx = %x", lastEntryHash))
-		}
-		ot.stack = append(ot.stack, lastTxEntry)
-		currentEntry = lastTxEntry
-	}
 */
-
 	//store the opcode and its related data
 	currentEntry.Opcodes = append(
 		currentEntry.Opcodes,
-		opcode{Uint64AsHex{pc}, op.String(), stackTop, retStackTop, st.Len(), lrs, false},
+		opcode{Uint64AsHex{pc}, op, stackTop, retStackTop, st.Len(), lrs, err},
 	)
 
-	//fmt.Printf("Tx  %s pc %x opcode %s", currentTxHash.String(), pc, op.String())
 
 	return nil
 }
 func (ot *opcodeTracer) CaptureFault(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, stack *stack.Stack, rst *stack.ReturnStack, contract *vm.Contract, depth int, err error) error {
 	ot.CaptureState(env, pc, op, gas, cost, memory, stack, rst, nil, contract, depth, err)
 
-	//l := len(ot.Txs)
-	//tracedTx := &ot.Txs[l-1]
-	//lastOpcode := len(*tracedTx.Opcodes)
-	//tracedTx.Opcodes[lastOpcode].Fault = true
-
-	currentTx := env.TxHash.String()
-
-	fmt.Fprintf(ot.summary, "FAULT %s err=%v\n", strings.Repeat("\t",depth), err.Error())
-	fmt.Printf("FAULT %s tx=%s err=%v\n", strings.Repeat("\t",depth), currentTx, err.Error())
-
-	//t.summary.Flush()
 	return nil
 }
 
@@ -316,7 +262,56 @@ func (ot *opcodeTracer) CaptureAccountWrite(account common.Address) error {
 }
 
 func NewOpcodeTracer() *opcodeTracer {
-	return &opcodeTracer{}
+	res := new(opcodeTracer)
+	res.txsInDepth = make([]int8,1,4)
+	return res
+}
+
+func CreateSegments(txs []*tx) {
+	// digest the series of opcodes into segments
+
+	for i := range txs  {
+		t := (txs)[i]
+		if len(t.Opcodes) == 0 {
+			continue
+		}
+		//fmt.Printf("tx %d-%s -\n", t.Depth, t.TxHash)
+		var lastOpWasPush 	bool
+		var lastPc   		uint64
+		var lastOp			vm.OpCode = 0xfe // op INVALID
+		//firstSegment := true
+		//t.Segments = append(t.Segments, segment{})
+		//startPc := 0
+		for i := range t.Opcodes {
+			o := t.Opcodes[i]
+			ls := len(t.Segments)
+			if (ls>0) && (o.Pc.uint64 == lastPc+1 || lastOpWasPush) { // not the first segment, and no discontinuity
+				lastPc = o.Pc.uint64
+				lastOpWasPush = o.Op.IsPush()
+				lastOp = o.Op
+			} else {
+				// we have a discontinuity in the control flow. Record the end of the past segment and start a new one
+				//ls := len(t.Segments)
+				if ls>0 {
+					t.Segments[ls-1].End = lastPc
+					//fmt.Printf("End\t%x\t%s\n", lastPc, lastOp.String())
+				}
+				t.Segments = append(t.Segments, segment{Start:  o.Pc.uint64})
+				//fmt.Printf("Start\t%x\t%s\n", o.Pc.uint64, o.Op.String())
+				//sanity check
+				if o.Op.IsPush() && o.Pc.uint64 != 0 {
+					panic(fmt.Sprintf("First op at non-first segment is a PUSH - this is impossible, should be JUMPDEST. pc=%x, lastpc=%x, lastOp=%s, tx=%d-%s", o.Pc.uint64,  lastPc, lastOp.String(), t.Depth, t.TxHash))
+				}
+
+				lastPc = o.Pc.uint64
+				lastOpWasPush = o.Op.IsPush()
+				lastOp = o.Op
+			}
+		}
+		ls := len(t.Segments)
+		t.Segments[ls-1].End = lastPc
+		//fmt.Printf("%d segments, last = %v\n", ls, t.Segments[ls-1])
+	}
 }
 
 // CheckChangeSets re-executes historical transactions in read-only mode
@@ -337,19 +332,27 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		interruptCh <- true
 	}()
 
-	ot := new(opcodeTracer)//NewOpcodeTracer()
+	ot := NewOpcodeTracer()
 
 	f, err := os.OpenFile("./opcodes.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	check(err)
 	defer f.Close()
 	ot.detail = bufio.NewWriter(f)
 	defer ot.detail.Flush()
+	fmt.Fprint(ot.detail, "{\n")
+	defer fmt.Fprint(ot.detail, "\n}")
 
 	f2, err := os.OpenFile("./summary", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	check(err)
 	defer f2.Close()
 	ot.summary = bufio.NewWriter(f2)
 	defer ot.summary.Flush()
+
+	f3, err := os.OpenFile("./segments.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	check(err)
+	defer f3.Close()
+	fileSegments := bufio.NewWriter(f2)
+	defer fileSegments.Flush()
 
 	chainDb := ethdb.MustOpen(chaindata)
 	defer chainDb.Close()
@@ -377,6 +380,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 	interrupt := false
 	batch := chainDb.NewBatch()
 	defer batch.Rollback()
+	alreadyWrote := false
 	for !interrupt {
 		block := bc.GetBlockByNumber(blockNum)
 		if block == nil {
@@ -523,32 +527,41 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 			}
 		}
 
-		m := make(map[uint64][]*tx)
-		m[block.Number().Uint64()] = ot.Txs
-		json, err := json.MarshalIndent(m, "", fmt.Sprintf("\t"))
-		if err != nil {
-			log.Error(err.Error())
-		}
-		ot.detail.Write(json)
 
-
+		// write a text summary of interesting things
 		numOpcodes := 0
 		for _ , t := range ot.Txs {
-			depthPrefix := ""
-			if t.Depth > 0 {
-				depthPrefix = fmt.Sprintf("%d-", t.Depth)
-			}
-			fmt.Fprintf(ot.summary, "tx %s%s  input=%x\n", depthPrefix, t.TxHash, t.Input)
-			for i , o := range t.Opcodes {
-				fmt.Fprintf(ot.summary, "%d\t%x\t%-20s", i, o.Pc.uint64, o.Op)
-				if l := o.StackTop.Len(); l>0 {
-					fmt.Fprintf(ot.summary, "\t%d:", o.MaxStack)
-					for i := 0; i < l; i++ {
-						fmt.Fprintf(ot.summary, "%x ", o.StackTop.Back(i))
-					}
+
+			for i := range t.Opcodes {
+				o := &t.Opcodes[i]
+				//only print to the summary the opcodes that are interesting
+				if (o.MaxRStack == 0) && (o.Fault == nil) {
+					continue
 				}
+
+				//depthPrefix := ""
+				//if t.Depth > 0 {
+				//	depthPrefix = fmt.Sprintf("%d-", t.Depth)
+				//}
+				fmt.Fprintf(ot.summary, "b=%d taddr=%s f=%s tx=%s\n", blockNum, t.TxAddr, t.Fault, t.TxHash)
+
+				fmt.Fprintf(ot.summary, "%d\t%x\t%-20s", i, o.Pc.uint64, o.Op.String())
+				if o.Fault != nil {
+					fmt.Fprintf(ot.summary, "FAULT:%s", o.Fault.Error())
+				}
+
+				//print the stack
+				//if l := o.StackTop.Len(); l>0 {
+				//	fmt.Fprintf(ot.summary, "\t%d:", o.MaxStack)
+				//	for i := 0; i < l; i++ {
+				//		fmt.Fprintf(ot.summary, "%x ", o.StackTop.Back(i))
+				//	}
+				//}
+
+				//print the Rstack
 				if o.MaxRStack > 0 {
-					fmt.Fprintf(ot.summary, "\t\trs:%d:", o.MaxRStack)
+					fmt.Fprintf(ot.summary, "\trs:%d:", o.MaxRStack)
+					//fmt.Printf("return stack used in block %d, tx %s", blockNum)
 					for i := 0; i < o.MaxRStack; i++ {
 						fmt.Fprintf(ot.summary, "%x ", o.RetStackTop[i])
 					}
@@ -557,10 +570,24 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 			}
 			numOpcodes += len(t.Opcodes)
 		}
-		//fmt.Printf("Block %d : %d toplevel txs, %d txs, %d opcodes\n", blockNum, ot.c, len(ot.Txs), numOpcodes)
+
+		CreateSegments(ot.Txs)
+
+		// dump all the data as JSON
+		// surround the Tx array with a block number map entry
+		if alreadyWrote {
+			ot.detail.WriteString(",")
+		}
+		ot.detail.WriteString(fmt.Sprintf("\"%d\":\n",block.Number().Uint64()))
+		json, err := json.Marshal(ot.Txs)//json.MarshalIndent(ot.Txs, "", fmt.Sprintf("\t"))
+		if err != nil {
+			log.Error(err.Error())
+		}
+		ot.detail.Write(json)
+		alreadyWrote = true
+
 		ot.Txs = nil
-		//ot.counterNonCalls = 0
-		//ot.counterCalls = 0
+		ot.txsInDepth[0] = 0
 
 		blockNum++
 		if blockNum%1000 == 0 {
