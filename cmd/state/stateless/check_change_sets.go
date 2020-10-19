@@ -4,9 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/gob"
 	"fmt"
-	"github.com/holiman/uint256"
 	"github.com/ledgerwatch/turbo-geth/common"
 	"github.com/ledgerwatch/turbo-geth/common/changeset"
 	"github.com/ledgerwatch/turbo-geth/consensus/ethash"
@@ -31,36 +30,41 @@ import (
 //const MaxUint64 = ^uint64(0)
 
 type opcode struct {
-	Pc       		Uint64AsHex
+	Pc       		uint64
 	Op       		vm.OpCode
-	StackTop 		*stack.Stack
+	//StackTop 		*stack.Stack
 	//StackTop 		[]uint256.Int
-	RetStackTop		[]uint32
+	RetStackTop		RetStackTop
 	MaxStack 		int
 	MaxRStack 		int
-	Fault    		error
+	Fault    		string
 	//Depth 			int
 }
 
+type	RetStackTop	[]uint32
+
 type tx struct {
-	TxHash          string
+	TxHash          *common.Hash
 	Depth 			int
 	TxAddr			string
-	CodeHash 		string
+	CodeHash 		*common.Hash
 	From            common.Address
 	To              common.Address
-	Input 			ByteSliceAsHex
-	Segments 		[]segment
+	Input 			SliceBytes //ByteSliceAsHex
+	//Segments 		[]segment
 	Create			bool
-	Fault 			error
-	Opcodes         []opcode
+	Fault 			string
+	Opcodes         SliceOpcodes
 }
 
+type	SliceBytes 		[]byte
+type 	SliceOpcodes	[]opcode
+
 type opcodeTracer struct {
-	Txs             	[]*tx
-	detail, summary   	*bufio.Writer
+	Txs             	slicePtrTx
+	//detail, summary   	*bufio.Writer
 	//c 					int
-	stack 				[]*tx
+	stack 				slicePtrTx
 	//stackIndexes		[]int
 	showNext			bool
 	lastLine			string
@@ -68,21 +72,17 @@ type opcodeTracer struct {
 
 }
 
-type ByteSliceAsHex struct {
-	ByteSlice	[]byte
-}
+//easyjson:json
+type	slicePtrTx	[]*tx
 
-func (bs ByteSliceAsHex) MarshalJSON() ([]byte, error) {
-	return json.Marshal(fmt.Sprintf("%x", bs.ByteSlice))
-}
+//type ByteSliceAsHex struct {
+//	ByteSlice	[]byte
+//}
+//
+//func (bs ByteSliceAsHex) MarshalJSON() ([]byte, error) {
+//	return json.Marshal(fmt.Sprintf("%x", bs.ByteSlice))
+//}
 
-type Uint64AsHex struct {
-	uint64
-}
-
-func (ui Uint64AsHex) MarshalJSON() ([]byte, error) {
-	return json.Marshal(fmt.Sprintf("%x", ui.uint64))
-}
 
 func min(a int, b int) int {
 	if a<b {
@@ -95,6 +95,23 @@ func min(a int, b int) int {
 type segment struct {
 	Start 	uint64
 	End		uint64
+}
+
+type segmentDump struct {
+	Tx			string
+	TxAddr		string
+	CodeHash	string
+	Segments 	[]segment
+}
+
+type blockSegments struct {
+	BlockNum uint64
+	Segments []segmentDump
+}
+
+type blockTxs struct {
+	BlockNum	*uint64
+	Txs 		*slicePtrTx
 }
 
 func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) error {
@@ -119,7 +136,7 @@ func (ot *opcodeTracer) CaptureStart(depth int, from common.Address, to common.A
 	} else {
 		txAddr = strconv.Itoa(int(ot.txsInDepth[depth]))
 	}
-	newTx := tx{From: from, To: to,  Create: create, Input: ByteSliceAsHex{input}, Depth: depth, TxAddr: txAddr}
+	newTx := tx{From: from, To: to,  Create: create, Input: input, Depth: depth, TxAddr: txAddr}
 	ot.Txs = append(ot.Txs, &newTx)
 
 	// take note in our own stack that the tx stack has grown
@@ -145,7 +162,11 @@ func (ot *opcodeTracer) CaptureEnd(depth int, output []byte, gasUsed uint64, t t
 		panic(fmt.Sprintf("End of Tx at d=%d but stack has d=%d and entry has d=%", depth, ls, currentEntry.Depth))
 	}
 	ot.stack = ot.stack[ : ls-1]
-	currentEntry.Fault = err
+	errstr := ""
+	if err != nil {
+		errstr = err.Error()
+	}
+	currentEntry.Fault = errstr
 	ot.txsInDepth = ot.txsInDepth[:depth+1]
 
 
@@ -179,7 +200,7 @@ func (ot *opcodeTracer) CaptureEnd(depth int, output []byte, gasUsed uint64, t t
 
 func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, cost uint64, memory *vm.Memory, st *stack.Stack, retst *stack.ReturnStack, rData []byte, contract *vm.Contract, opDepth int, err error) error {
 
-	currentTxHash := env.TxHash.String()
+	currentTxHash := env.TxHash
 	currentTxDepth := opDepth - 1
 
 	ls := len(ot.stack)
@@ -191,22 +212,32 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 	}
 
 	// prepare the opcode's stack for saving
-	stackTop := &stack.Stack{Data: make([]uint256.Int, 0, 7)}//stack.New()
+	//stackTop := &stack.Stack{Data: make([]uint256.Int, 0, 7)}//stack.New()
 	// the most stack positions consumed by any opcode is 7
-	for i:= min(7, st.Len()-1); i>=0; i-- {
-		stackTop.Push(st.Back(i))
-	}
-	//stackTop := make([]uint256.Int, 7)
-	//copy(stackTop, st.Data)
+	//for i:= min(7, st.Len()-1); i>=0; i-- {
+	//	stackTop.Push(st.Back(i))
+	//}
+
+	//THIS VERSION SHOULD BE FASTER BUT IS UNTESTED
+	//stackTop := make([]uint256.Int, 7, 7)
+	//sl := st.Len()
+	//minl := min(7, sl)
+	//startcopy := sl-minl
+	//stackTop := &stack.Stack{Data: make([]uint256.Int, minl, minl)}//stack.New()
+	//copy(stackTop.Data, st.Data[startcopy:sl])
+
 
 	lrs := len(retst.Data())
-	retStackTop := make([]uint32, lrs)
-	copy(retStackTop, retst.Data())
+	var retStackTop []uint32
+	if lrs>0 {
+		retStackTop = make([]uint32, lrs, lrs)
+		copy(retStackTop, retst.Data())
+	}
 
 
 
 	// is the Tx entry still not fully initialized?
-	if currentEntry.TxHash == "" {
+	if currentEntry.TxHash == nil {
 		// CaptureStart creates the entry for a new Tx, but doesn't have access to EVM data, like the Tx Hash
 		// here we assume that the tx entry was recently created by CaptureStart
 		// AND this is the first CaptureState that has happened since then
@@ -215,8 +246,11 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 		// Note that the only connection between both that we can notice is that the current op's depth should be lastTxEntry.Depth+1
 
 		// fill in the missing data in the entry
-		currentEntry.TxHash = currentTxHash
-		currentEntry.CodeHash = contract.CodeHash.String()
+		currentEntry.TxHash = new(common.Hash)
+		currentEntry.TxHash.SetBytes(currentTxHash.Bytes())
+		currentEntry.CodeHash = new(common.Hash)
+		currentEntry.CodeHash.SetBytes(contract.CodeHash.Bytes())
+		currentEntry.Opcodes = make([]opcode, 0, 200)
 		//fmt.Fprintf(ot.w, "%sFilled in TxHash\n", strings.Repeat("\t",depth))
 	}
 
@@ -237,11 +271,12 @@ func (ot *opcodeTracer) CaptureState(env *vm.EVM, pc uint64, op vm.OpCode, gas, 
 	ot.lastLine = line
 */
 	//store the opcode and its related data
-	currentEntry.Opcodes = append(
-		currentEntry.Opcodes,
-		opcode{Uint64AsHex{pc}, op, stackTop, retStackTop, st.Len(), lrs, err},
-	)
-
+	errstr := ""
+	if err != nil {
+		errstr = err.Error()
+	}
+	newOpcode := opcode{pc, op, retStackTop, st.Len(), lrs, errstr}
+	currentEntry.Opcodes = append(currentEntry.Opcodes, newOpcode)
 
 	return nil
 }
@@ -264,54 +299,57 @@ func (ot *opcodeTracer) CaptureAccountWrite(account common.Address) error {
 func NewOpcodeTracer() *opcodeTracer {
 	res := new(opcodeTracer)
 	res.txsInDepth = make([]int8,1,4)
+	res.stack = make([]*tx, 0, 8)
+	res.Txs = make([]*tx, 0, 50)
 	return res
 }
 
-func CreateSegments(txs []*tx) {
-	// digest the series of opcodes into segments
+func CreateSegments(t *tx) (segments []segment) {
+	// digest the series of opcodes into Segments
 
-	for i := range txs  {
-		t := (txs)[i]
-		if len(t.Opcodes) == 0 {
-			continue
-		}
-		//fmt.Printf("tx %d-%s -\n", t.Depth, t.TxHash)
-		var lastOpWasPush 	bool
-		var lastPc   		uint64
-		var lastOp			vm.OpCode = 0xfe // op INVALID
-		//firstSegment := true
-		//t.Segments = append(t.Segments, segment{})
-		//startPc := 0
-		for i := range t.Opcodes {
-			o := t.Opcodes[i]
-			ls := len(t.Segments)
-			if (ls>0) && (o.Pc.uint64 == lastPc+1 || lastOpWasPush) { // not the first segment, and no discontinuity
-				lastPc = o.Pc.uint64
-				lastOpWasPush = o.Op.IsPush()
-				lastOp = o.Op
-			} else {
-				// we have a discontinuity in the control flow. Record the end of the past segment and start a new one
-				//ls := len(t.Segments)
-				if ls>0 {
-					t.Segments[ls-1].End = lastPc
-					//fmt.Printf("End\t%x\t%s\n", lastPc, lastOp.String())
-				}
-				t.Segments = append(t.Segments, segment{Start:  o.Pc.uint64})
-				//fmt.Printf("Start\t%x\t%s\n", o.Pc.uint64, o.Op.String())
-				//sanity check
-				if o.Op.IsPush() && o.Pc.uint64 != 0 {
-					panic(fmt.Sprintf("First op at non-first segment is a PUSH - this is impossible, should be JUMPDEST. pc=%x, lastpc=%x, lastOp=%s, tx=%d-%s", o.Pc.uint64,  lastPc, lastOp.String(), t.Depth, t.TxHash))
-				}
-
-				lastPc = o.Pc.uint64
-				lastOpWasPush = o.Op.IsPush()
-				lastOp = o.Op
-			}
-		}
-		ls := len(t.Segments)
-		t.Segments[ls-1].End = lastPc
-		//fmt.Printf("%d segments, last = %v\n", ls, t.Segments[ls-1])
+	if len(t.Opcodes) == 0 {
+		return nil
 	}
+
+	segments = make([]segment, 0, 8)
+	//fmt.Printf("tx %d-%s -\n", t.Depth, t.TxHash)
+	var lastOpWasPush 	bool
+	var lastPc   		uint64
+	var lastOp			vm.OpCode = 0xfe // op INVALID
+	//firstSegment := true
+	//t.Segments = append(t.Segments, segment{})
+	//startPc := 0
+	for i := range t.Opcodes {
+		o := t.Opcodes[i]
+		ls := len(segments)
+		if (ls>0) && (o.Pc == lastPc+1 || lastOpWasPush) { // not the first segment, and no discontinuity
+			lastPc = o.Pc
+			lastOpWasPush = o.Op.IsPush()
+			lastOp = o.Op
+		} else {
+			// we have a discontinuity in the control flow. Record the end of the past segment and start a new one
+			//ls := len(t.Segments)
+			if ls>0 {
+				segments[ls-1].End = lastPc
+				//fmt.Printf("End\t%x\t%s\n", lastPc, lastOp.String())
+			}
+			segments = append(segments, segment{Start:  o.Pc})
+			//fmt.Printf("Start\t%x\t%s\n", o.Pc.uint64, o.Op.String())
+			//sanity check
+			if o.Op.IsPush() && o.Pc != 0 {
+				panic(fmt.Sprintf("First op at non-first segment is a PUSH - this is impossible, should be JUMPDEST. pc=%x, lastpc=%x, lastOp=%s, tx=%d-%s", o.Pc,  lastPc, lastOp.String(), t.Depth, t.TxHash))
+			}
+
+			lastPc = o.Pc
+			lastOpWasPush = o.Op.IsPush()
+			lastOp = o.Op
+		}
+	}
+	ls := len(segments)
+	segments[ls-1].End = lastPc
+	//fmt.Printf("%d Segments, last = %v\n", ls, t.Segments[ls-1])
+
+	return segments
 }
 
 // CheckChangeSets re-executes historical transactions in read-only mode
@@ -334,25 +372,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 
 	ot := NewOpcodeTracer()
 
-	f, err := os.OpenFile("./opcodes.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	check(err)
-	defer f.Close()
-	ot.detail = bufio.NewWriter(f)
-	defer ot.detail.Flush()
-	fmt.Fprint(ot.detail, "{\n")
-	defer fmt.Fprint(ot.detail, "\n}")
 
-	f2, err := os.OpenFile("./summary", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	check(err)
-	defer f2.Close()
-	ot.summary = bufio.NewWriter(f2)
-	defer ot.summary.Flush()
-
-	f3, err := os.OpenFile("./segments.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	check(err)
-	defer f3.Close()
-	fileSegments := bufio.NewWriter(f2)
-	defer fileSegments.Flush()
 
 	chainDb := ethdb.MustOpen(chaindata)
 	defer chainDb.Close()
@@ -380,12 +400,52 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 	interrupt := false
 	batch := chainDb.NewBatch()
 	defer batch.Rollback()
-	alreadyWrote := false
+	//alreadyWrote := false
+
+	var fops		*os.File
+	var fopsWriter	*bufio.Writer
+	var fopsEnc 	*gob.Encoder
+
+	var fsum, fseg /*, fsegJson*/ *os.File
+	var fsegWriter, fsumWriter /*, fsjWriter*/ *bufio.Writer
+	var fsegEnc *gob.Encoder
 	for !interrupt {
 		block := bc.GetBlockByNumber(blockNum)
 		if block == nil {
 			break
 		}
+
+		bnStr := strconv.Itoa(int(blockNum))
+		if fops == nil {
+			fops, err = os.Create("./opcodes-"+bnStr)
+			check(err)
+			fopsWriter = bufio.NewWriter(fops)
+			fopsEnc = gob.NewEncoder(fopsWriter)
+		}
+
+		if fseg == nil {
+			fseg, err = os.Create("./segments-"+bnStr)
+			check(err)
+			fsegWriter = bufio.NewWriter(fseg)
+			fsegEnc = gob.NewEncoder(fsegWriter)
+		}
+
+/*		if fsegJson == nil {
+			fsegJson, err := os.Create("./segments-"+bnStr+".json")
+			check(err)
+			fsjWriter = bufio.NewWriter(fsegJson)
+			fsjWriter.WriteString("{\n")
+		}*/
+
+		if fsum == nil {
+			fsum, err = os.Create("./summary-"+bnStr)
+			check(err)
+			//defer fsum.Close()
+			fsumWriter = bufio.NewWriter(fsum)
+			//defer summary.Flush()
+		}
+
+
 
 		dbstate := state.NewPlainDBState(historyTx, block.NumberU64()-1)
 		intraBlockState := state.New(dbstate)
@@ -535,20 +595,20 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 			for i := range t.Opcodes {
 				o := &t.Opcodes[i]
 				//only print to the summary the opcodes that are interesting
-				if (o.MaxRStack == 0) && (o.Fault == nil) {
+				if (o.MaxRStack != 0) { //|| (o.Fault != nil) {
+					//pass
+				} else {
 					continue
 				}
 
-				//depthPrefix := ""
-				//if t.Depth > 0 {
-				//	depthPrefix = fmt.Sprintf("%d-", t.Depth)
-				//}
-				fmt.Fprintf(ot.summary, "b=%d taddr=%s f=%s tx=%s\n", blockNum, t.TxAddr, t.Fault, t.TxHash)
 
-				fmt.Fprintf(ot.summary, "%d\t%x\t%-20s", i, o.Pc.uint64, o.Op.String())
+				fmt.Fprintf(fsumWriter, "b=%d taddr=%s f=%s tx=%s\n", blockNum, t.TxAddr, t.Fault, t.TxHash)
+/*
+				fmt.Fprintf(summary, "%d\t%x\t%-20s", i, o.Pc.uint64, o.Op.String())
 				if o.Fault != nil {
-					fmt.Fprintf(ot.summary, "FAULT:%s", o.Fault.Error())
+					fmt.Fprintf(summary, "FAULT:%s", o.Fault.Error())
 				}
+*/
 
 				//print the stack
 				//if l := o.StackTop.Len(); l>0 {
@@ -560,38 +620,91 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 
 				//print the Rstack
 				if o.MaxRStack > 0 {
-					fmt.Fprintf(ot.summary, "\trs:%d:", o.MaxRStack)
-					//fmt.Printf("return stack used in block %d, tx %s", blockNum)
+					fmt.Fprintf(fsumWriter, "\trs:%d:", o.MaxRStack)
+					//fmt.Printf("return stack used in block %d, tx %s", BlockNum)
 					for i := 0; i < o.MaxRStack; i++ {
-						fmt.Fprintf(ot.summary, "%x ", o.RetStackTop[i])
+						fmt.Fprintf(fsumWriter, "%x ", o.RetStackTop[i])
 					}
 				}
-				fmt.Fprint(ot.summary, "\n")
+
+				fmt.Fprint(fsumWriter, "\n")
 			}
 			numOpcodes += len(t.Opcodes)
 		}
 
-		CreateSegments(ot.Txs)
+		bt := blockTxs{&blockNum, &ot.Txs}
+		err = fopsEnc.Encode(bt)
+		check(err)
+
+
+		sd := make([]segmentDump, 0, len(ot.Txs))
+		var i int
+		for i  = range ot.Txs  {
+			t := ot.Txs[i]
+			segs := CreateSegments(t)
+			var th, ch string
+			if t.TxHash != nil {
+				th = t.TxHash.String()
+			}
+			if t.CodeHash != nil {
+				ch = t.CodeHash.String()
+			}
+
+			sd = append(sd, segmentDump{th, t.TxAddr, ch, segs})
+			//fmt.Printf("Encoded tx %s with %d segs\n", t.TxAddr, len(segs))
+
+		}
+		bs := blockSegments{blockNum, sd}
+		//fileSegmentsEncoder.Encode(blockNum)
+		err = fsegEnc.Encode(bs)
+		check(err)
+
+
+		//fmt.Printf("buffered %d", fileSegmentsWriter.Buffered())
+		//fileSegmentsWriter.Flush()
+
 
 		// dump all the data as JSON
 		// surround the Tx array with a block number map entry
-		if alreadyWrote {
-			ot.detail.WriteString(",")
+/*		if alreadyWrote {
+			fsjWriter.WriteString(",")
 		}
-		ot.detail.WriteString(fmt.Sprintf("\"%d\":\n",block.Number().Uint64()))
-		json, err := json.Marshal(ot.Txs)//json.MarshalIndent(ot.Txs, "", fmt.Sprintf("\t"))
-		if err != nil {
-			log.Error(err.Error())
-		}
-		ot.detail.Write(json)
-		alreadyWrote = true
+		fsjWriter.WriteString("\""+strconv.Itoa(int(blockNum))+"\":\n")
+		//json, err := json.Marshal(ot.Txs)//json.MarshalIndent(ot.Txs, "", fmt.Sprintf("\t"))
+		//fsjWriter.Write(json)
+		_, err = easyjson.MarshalToWriter(ot.Txs, fsjWriter)
+		check(err)
+		//fsjWriter.Write(json)
+		alreadyWrote = true*/
+
+
 
 		ot.Txs = nil
 		ot.txsInDepth[0] = 0
+		//ot = NewOpcodeTracer()
 
 		blockNum++
 		if blockNum%1000 == 0 {
 			log.Info("Checked", "blocks", blockNum)
+
+			//close current files
+			fopsWriter.Flush()
+			fops.Close()
+			fops = nil
+
+			fsumWriter.Flush()
+			fsum.Close()
+			fsum = nil
+
+			fsegWriter.Flush()
+			fseg.Close()
+			fseg = nil
+
+/*			fsjWriter.WriteString("\n}")
+			fsjWriter.Flush()
+			fsegJson.Close()
+			fsegJson = nil*/
+
 		}
 
 		// Check for interrupts
@@ -601,7 +714,7 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 		default:
 		}
 
-		if blockNum>blockNumOrig + numBlocks {
+		if blockNum>=blockNumOrig + numBlocks {
 			interrupt = true
 		}
 	}
@@ -613,5 +726,52 @@ func CheckChangeSets(genesis *core.Genesis, blockNum uint64, chaindata string, h
 	}
 	log.Info("Checked", "blocks", blockNum, "next time specify --block", blockNum, "duration", time.Since(startTime))
 
+	fopsWriter.Flush()
+	fops.Close()
+	fops = nil
+
+	fsumWriter.Flush()
+	fsum.Close()
+	fsum = nil
+
+	fsegWriter.Flush()
+	fseg.Close()
+	fseg = nil
+
+	/*
+
+	f4, err := os.Open("./segments.gzip")
+	check(err)
+	defer f4.Close()
+	segReader, _ := gzip.NewReader(f4)
+	defer segReader.Close()
+	segDec := gob.NewDecoder(segReader)
+	bs := new(blockSegments)
+	//var err error
+	count :=  0
+	//var bn uint64
+	//err = segDec.Decode(&bn)
+	for {
+		err = segDec.Decode(&bs)
+		if err != nil {
+			break
+		}
+		count++
+		//fmt.Fprintf(summary, "Decoded blockSegments b=%d, nsegs=%d\n", bs.BlockNum, len(bs.Segments))
+		//fmt.Printf("Decoded blockSegments b=%d, nsegs=%d\n", bs.BlockNum, len(bs.Segments))
+
+		//for i := range *bs.Segments {
+		//	bss := &((*bs.Segments)[i])
+		//	fmt.Fprintf(summary, "\tEntry %d txaddr=%s segs=%d tx=%s ch=%s\n", i, bss.TxAddr, len(bss.Segments), bss.Tx, bss.CodeHash)
+		//	//for i:= range bss.Segments {
+		//	//	s := &bss.Segments[i]
+		//	//	fmt.Fprintf(summary, "\t\tSeg%d %x-%x\n", i, s.Start, s.End)
+		//	//}
+		//}
+		//fmt.Fprintf(summary, "")
+	}
+	fmt.Printf( "Decoded %d, err=%s\n", count, err.Error())
+
+*/
 	return nil
 }
